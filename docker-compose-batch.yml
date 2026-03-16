@@ -57,28 +57,90 @@ services:
     networks:
       - batch-net
 
-  # ─── MinIO single node ────────────────────────────────────────────────────────
+  # ─── MinIO Distributed Cluster (4 nœuds) ─────────────────────────────────────
+  # Mode : distributed server — Erasure Coding Reed-Solomon activé automatiquement
+  # Tolérance : 1 nœud peut tomber, le cluster reste opérationnel (N/2 - 1 pannes max)
+  # Accès S3 : http://minio1:9000  (load-balancé via les 4 nœuds)
   minio1:
     image: quay.io/minio/minio:latest
     container_name: minio1_batch
     hostname: minio1
-    command: server /data --console-address ":9001"
+    command: server http://minio{1...4}/data --console-address ":9001"
     ports:
       - "9001:9001"
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SITE_NAME: batch-cluster
     volumes:
       - minio1-data:/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 15
+    networks:
+      - batch-net
+
+  minio2:
+    image: quay.io/minio/minio:latest
+    container_name: minio2_batch
+    hostname: minio2
+    command: server http://minio{1...4}/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SITE_NAME: batch-cluster
+    volumes:
+      - minio2-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    networks:
+      - batch-net
+
+  minio3:
+    image: quay.io/minio/minio:latest
+    container_name: minio3_batch
+    hostname: minio3
+    command: server http://minio{1...4}/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SITE_NAME: batch-cluster
+    volumes:
+      - minio3-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    networks:
+      - batch-net
+
+  minio4:
+    image: quay.io/minio/minio:latest
+    container_name: minio4_batch
+    hostname: minio4
+    command: server http://minio{1...4}/data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      MINIO_SITE_NAME: batch-cluster
+    volumes:
+      - minio4-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
     networks:
       - batch-net
 
   # ─── Init buckets MinIO ───────────────────────────────────────────────────────
+  # Attend que TOUS les 4 nœuds soient healthy avant de créer les buckets
   minio-init:
     image: python:3.12-slim
     container_name: minio_init_batch
@@ -89,7 +151,7 @@ services:
       sh -c "
       pip install boto3 --quiet &&
       until python init_minio_bucket.py; do
-        echo 'MinIO not ready, retrying...';
+        echo 'MinIO cluster not ready, retrying...';
         sleep 3;
       done
       "
@@ -97,6 +159,12 @@ services:
       - batch-net
     depends_on:
       minio1:
+        condition: service_healthy
+      minio2:
+        condition: service_healthy
+      minio3:
+        condition: service_healthy
+      minio4:
         condition: service_healthy
 
   # ─── Iceberg REST Catalog ─────────────────────────────────────────────────────
@@ -136,7 +204,7 @@ services:
       - ./spark_batch_iceberg.py:/opt/spark/work-dir/spark_batch_iceberg.py
       - ./spark-jars:/opt/spark/extra-jars
     entrypoint: ["/bin/bash", "-c"]
-    command: ["apt-get install -y -q curl 2>/dev/null || true && echo 'Waiting for MinIO...' && until curl -sf http://minio1:9000/minio/health/live; do echo 'MinIO not ready...'; sleep 3; done && echo 'MinIO OK' && echo 'Waiting for Iceberg REST...' && until curl -sf http://iceberg-rest:8181/v1/config; do echo 'Iceberg REST not ready...'; sleep 3; done && echo 'Iceberg REST OK' && echo 'Waiting for Kafka...' && until bash -c 'cat < /dev/null > /dev/tcp/kafka-batch/9092' 2>/dev/null; do echo 'Kafka not ready...'; sleep 3; done && echo 'ALL SERVICES READY - Starting Spark...' && sleep 5 && chmod 755 /opt/spark/work-dir/spark_batch_iceberg.py && /opt/spark/bin/spark-submit --master local[*] --driver-memory 4g --conf spark.memory.fraction=0.8 --conf spark.sql.shuffle.partitions=4 --conf spark.default.parallelism=4 --jars /opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.5.0.jar,/opt/spark/extra-jars/spark-sql-kafka-0-10_2.12-3.5.3.jar,/opt/spark/extra-jars/spark-token-provider-kafka-0-10_2.12-3.5.3.jar,/opt/spark/extra-jars/kafka-clients-3.4.1.jar,/opt/spark/extra-jars/bundle-2.21.1.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/commons-pool2-2.11.1.jar --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.iceberg.type=rest --conf spark.sql.catalog.iceberg.uri=http://iceberg-rest:8181 --conf spark.sql.catalog.iceberg.warehouse=s3://iceberg/ --conf spark.sql.catalog.iceberg.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.catalog.iceberg.s3.endpoint=http://minio1:9000 --conf spark.hadoop.fs.s3a.endpoint=http://minio1:9000 --conf spark.hadoop.fs.s3a.access.key=minioadmin --conf spark.hadoop.fs.s3a.secret.key=minioadmin --conf spark.hadoop.fs.s3a.path.style.access=true --conf spark.sql.catalog.iceberg.s3.region=us-east-1 --conf spark.sql.catalog.iceberg.client.region=us-east-1 --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider --conf spark.driver.extraJavaOptions=-Daws.region=us-east-1 --conf spark.executor.extraJavaOptions=-Daws.region=us-east-1 /opt/spark/work-dir/spark_batch_iceberg.py"]
+    command: ["apt-get install -y -q curl 2>/dev/null || true && echo 'Waiting for MinIO cluster...' && until curl -sf http://minio1:9000/minio/health/live && curl -sf http://minio2:9000/minio/health/live && curl -sf http://minio3:9000/minio/health/live && curl -sf http://minio4:9000/minio/health/live; do echo 'MinIO cluster not ready...'; sleep 3; done && echo 'MinIO cluster OK (4/4 nodes)' && echo 'Waiting for Iceberg REST...' && until curl -sf http://iceberg-rest:8181/v1/config; do echo 'Iceberg REST not ready...'; sleep 3; done && echo 'Iceberg REST OK' && echo 'Waiting for Kafka...' && until bash -c 'cat < /dev/null > /dev/tcp/kafka-batch/9092' 2>/dev/null; do echo 'Kafka not ready...'; sleep 3; done && echo 'ALL SERVICES READY - Starting Spark...' && sleep 5 && chmod 755 /opt/spark/work-dir/spark_batch_iceberg.py && /opt/spark/bin/spark-submit --master local[*] --driver-memory 4g --conf spark.memory.fraction=0.8 --conf spark.sql.shuffle.partitions=4 --conf spark.default.parallelism=4 --jars /opt/spark/extra-jars/iceberg-spark-runtime-3.5_2.12-1.5.0.jar,/opt/spark/extra-jars/spark-sql-kafka-0-10_2.12-3.5.3.jar,/opt/spark/extra-jars/spark-token-provider-kafka-0-10_2.12-3.5.3.jar,/opt/spark/extra-jars/kafka-clients-3.4.1.jar,/opt/spark/extra-jars/bundle-2.21.1.jar,/opt/spark/extra-jars/hadoop-aws-3.3.4.jar,/opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar,/opt/spark/extra-jars/commons-pool2-2.11.1.jar --conf spark.sql.extensions=org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions --conf spark.sql.catalog.iceberg=org.apache.iceberg.spark.SparkCatalog --conf spark.sql.catalog.iceberg.type=rest --conf spark.sql.catalog.iceberg.uri=http://iceberg-rest:8181 --conf spark.sql.catalog.iceberg.warehouse=s3://iceberg/ --conf spark.sql.catalog.iceberg.io-impl=org.apache.iceberg.aws.s3.S3FileIO --conf spark.sql.catalog.iceberg.s3.endpoint=http://minio1:9000 --conf spark.hadoop.fs.s3a.endpoint=http://minio1:9000 --conf spark.hadoop.fs.s3a.access.key=minioadmin --conf spark.hadoop.fs.s3a.secret.key=minioadmin --conf spark.hadoop.fs.s3a.path.style.access=true --conf spark.sql.catalog.iceberg.s3.region=us-east-1 --conf spark.sql.catalog.iceberg.client.region=us-east-1 --conf spark.hadoop.fs.s3a.aws.credentials.provider=org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider --conf spark.driver.extraJavaOptions=-Daws.region=us-east-1 --conf spark.executor.extraJavaOptions=-Daws.region=us-east-1 /opt/spark/work-dir/spark_batch_iceberg.py"]
     networks:
       - batch-net
     depends_on:
@@ -181,4 +249,7 @@ networks:
 
 volumes:
   minio1-data:
+  minio2-data:
+  minio3-data:
+  minio4-data:
   grafana-batch-data:

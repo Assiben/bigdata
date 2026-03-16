@@ -105,48 +105,7 @@ services:
         condition: service_healthy
     networks:
       - pfe-net
-
-  minio1:
-    image: quay.io/minio/minio:latest
-    container_name: minio1
-    hostname: minio1
-    command: server http://minio{1...3}/data --console-address ":9001"
-    ports:
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio1-data:/data
-    networks:
-      - pfe-net
-
-  minio2:
-    image: quay.io/minio/minio:latest
-    container_name: minio2
-    hostname: minio2
-    command: server http://minio{1...3}/data
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio2-data:/data
-    networks:
-      - pfe-net
-
-  minio3:
-    image: quay.io/minio/minio:latest
-    container_name: minio3
-    hostname: minio3
-    command: server http://minio{1...3}/data
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio3-data:/data
-    networks:
-      - pfe-net
-
+      
 networks:
   pfe-net:
     driver: bridge
